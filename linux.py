@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Worm Linux Agent v0.1.0
+Worm Linux Agent v0.0.1
 - TUI startup wizard
 - Remote disk imaging protocol compatible with controller
 - AVML check/install guidance + RAM acquisition over protocol
