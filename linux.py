@@ -272,6 +272,45 @@ class LinuxAgentController:
         self.avml_path = avml_path
         self._progress_lock = threading.Lock()
         self.ram_output_index = {}
+        self._job_lock = threading.Lock()
+        self._job_state = {}
+
+    def _set_job_state(self, job_id, state):
+        if not job_id:
+            return
+        with self._job_lock:
+            self._job_state[job_id] = state
+
+    def _get_job_state(self, job_id):
+        if not job_id:
+            return "running"
+        with self._job_lock:
+            return self._job_state.get(job_id, "running")
+
+    def _clear_job_state(self, job_id):
+        if not job_id:
+            return
+        with self._job_lock:
+            self._job_state.pop(job_id, None)
+
+    def _control_job(self, job_id, action):
+        if not job_id or not action:
+            return False, "is_id ve eylem gerekli"
+        action = str(action).strip().lower()
+        if action not in {"pause", "resume", "stop"}:
+            return False, "Desteklenmeyen eylem"
+
+        with self._job_lock:
+            if job_id not in self._job_state:
+                return False, "Is bulunamadi"
+            if action == "pause":
+                self._job_state[job_id] = "paused"
+            elif action == "resume":
+                self._job_state[job_id] = "running"
+            else:
+                self._job_state[job_id] = "stopped"
+
+        return True, "Kontrol komutu uygulandi"
 
     def _fs_type(self, path):
         try:
@@ -391,6 +430,8 @@ class LinuxAgentController:
         json_send(conn, {"durum": "ok", "is_id": job_id, "tahmini_boyut": total_size})
         json_send(conn, {"tur": "veri_basliyor", "is_id": job_id, "toplam": total_size})
 
+        self._set_job_state(job_id, "running")
+
         sha256 = hashlib.sha256()
         md5 = hashlib.md5()
         sent = 0
@@ -399,6 +440,24 @@ class LinuxAgentController:
 
         with open(disk_path, "rb", buffering=0) as f:
             while sent < total_size:
+                state = self._get_job_state(job_id)
+                if state == "paused":
+                    time.sleep(0.2)
+                    continue
+                if state == "stopped":
+                    self._finish_progress()
+                    self.log(f"Disk transfer stopped by user: {disk_path} ({sent}/{total_size} bytes)")
+                    try:
+                        conn.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    self._clear_job_state(job_id)
+                    return
+
                 to_read = min(chunk_size, total_size - sent)
                 data = f.read(to_read)
                 if not data:
@@ -434,12 +493,15 @@ class LinuxAgentController:
                 "toplam": total_size,
             })
 
+        self._clear_job_state(job_id)
+
     def _stream_file(self, conn, file_path, job_id):
         if not os.path.exists(file_path):
             json_send(conn, {"durum": "hata", "is_id": job_id, "mesaj": f"File not found: {file_path}"})
             return
 
         total = os.path.getsize(file_path)
+        self._set_job_state(job_id, "running")
         sha256 = hashlib.sha256()
 
         json_send(conn, {"durum": "ok", "is_id": job_id, "tahmini_boyut": total})
@@ -450,6 +512,13 @@ class LinuxAgentController:
         label = self.t["progress_file"]
         with open(file_path, "rb") as f:
             while True:
+                state = self._get_job_state(job_id)
+                if state == "paused":
+                    time.sleep(0.2)
+                    continue
+                if state == "stopped":
+                    break
+
                 buf = f.read(BUFFER_SIZE)
                 if not buf:
                     break
@@ -476,6 +545,8 @@ class LinuxAgentController:
             self._finish_progress()
             self.log(f"File transfer interrupted: {file_path} ({sent}/{total} bytes)")
             json_send(conn, {"tur": "hata", "is_id": job_id, "mesaj": "File transfer interrupted"})
+
+        self._clear_job_state(job_id)
 
     def _ram_acquire_avml(self, conn, output_file, job_id):
         if os.geteuid() != 0:
@@ -506,6 +577,8 @@ class LinuxAgentController:
 
         label = self.t["progress_ram"]
 
+        self._set_job_state(job_id, "running")
+
         try:
             last_err = ""
             last_rc = -1
@@ -521,8 +594,32 @@ class LinuxAgentController:
 
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 last_report = 0.0
+                was_paused = False
 
                 while proc.poll() is None:
+                    state = self._get_job_state(job_id)
+                    if state == "paused":
+                        if not was_paused:
+                            try:
+                                proc.send_signal(signal.SIGSTOP)
+                            except Exception:
+                                pass
+                            was_paused = True
+                        time.sleep(0.2)
+                        continue
+                    if was_paused:
+                        try:
+                            proc.send_signal(signal.SIGCONT)
+                        except Exception:
+                            pass
+                        was_paused = False
+                    if state == "stopped":
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        break
+
                     if os.path.exists(output_file) and total > 0:
                         current = os.path.getsize(output_file)
                         pct = int((current * 100) / total)
@@ -547,6 +644,17 @@ class LinuxAgentController:
                     last_err = (proc.stderr.read() or b"").decode(errors="ignore").strip()
                 except Exception:
                     last_err = ""
+
+                if self._get_job_state(job_id) == "stopped":
+                    self._finish_progress()
+                    json_send(conn, {
+                        "tur": "hata",
+                        "is_id": job_id,
+                        "mesaj": f"RAM acquisition stopped by user | partial_size={final_size}",
+                        "kod": "STOPPED_BY_USER",
+                    })
+                    self.log(f"RAM acquisition stopped: {output_file} ({final_size} bytes)")
+                    return
 
                 if proc.returncode == 0 and final_size > 0:
                     if total > 0:
@@ -588,6 +696,8 @@ class LinuxAgentController:
         except Exception as e:
             self._finish_progress()
             json_send(conn, {"tur": "hata", "is_id": job_id, "mesaj": str(e), "kod": "EXCEPTION"})
+        finally:
+            self._clear_job_state(job_id)
 
     def _handle_client(self, conn, addr):
         self.log(f"{self.t['conn']} {addr}")
@@ -678,6 +788,17 @@ class LinuxAgentController:
                     file_name = os.path.basename(message.get("dosya", "memory_dump_linux.raw"))
                     full = self.ram_output_index.get(file_name, os.path.join(self.script_dir, file_name))
                     self._stream_file(conn, full, job_id)
+
+                elif cmd == "edinim_kontrol":
+                    job_id = message.get("is_id", "")
+                    action = message.get("eylem", "")
+                    ok, msg = self._control_job(job_id, action)
+                    json_send(conn, {
+                        "durum": "ok" if ok else "hata",
+                        "is_id": job_id,
+                        "eylem": action,
+                        "mesaj": msg,
+                    })
 
                 else:
                     json_send(conn, {"durum": "hata", "mesaj": f"{self.t['unknown_cmd']}: {cmd}"})
