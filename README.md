@@ -1,5 +1,7 @@
 # Worm Linux Agent
 
+![Worm Linux Agent Demo](linux.gif)
+
 ## Turkce
 
 Bu depo, Worm ana uygulamasi icin Linux Agent bileşenini icerir.
