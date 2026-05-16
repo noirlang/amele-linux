@@ -531,7 +531,18 @@ class LinuxAgentController:
                     time.sleep(0.2)
                     continue
                 if state == "stopped":
-                    break
+                    self._finish_progress()
+                    self.log(f"File transfer stopped by user: {file_path} ({sent}/{total} bytes)")
+                    try:
+                        conn.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    self._clear_job_state(job_id)
+                    return
 
                 buf = f.read(BUFFER_SIZE)
                 if not buf:
@@ -563,13 +574,17 @@ class LinuxAgentController:
         self._clear_job_state(job_id)
 
     def _ram_acquire_avml(self, conn, output_file, job_id):
+        self._set_job_state(job_id, "running")
+
         if os.geteuid() != 0:
             json_send(conn, {"tur": "hata", "is_id": job_id, "mesaj": self.t["ram_need_root"], "kod": "ROOT_REQUIRED"})
+            self._clear_job_state(job_id)
             return
 
         avml = self.avml_path or find_avml(self.script_dir)
         if not avml:
             json_send(conn, {"tur": "hata", "is_id": job_id, "mesaj": "AVML not found", "kod": "AVML_NOT_FOUND"})
+            self._clear_job_state(job_id)
             return
 
         if os.path.isfile(avml) and not os.access(avml, os.X_OK):
@@ -577,6 +592,16 @@ class LinuxAgentController:
                 os.chmod(avml, 0o755)
             except Exception:
                 pass
+
+        if self._get_job_state(job_id) == "stopped":
+            json_send(conn, {
+                "tur": "hata",
+                "is_id": job_id,
+                "mesaj": "RAM acquisition stopped by user",
+                "kod": "STOPPED_BY_USER",
+            })
+            self._clear_job_state(job_id)
+            return
 
         total = calc_mem_total_bytes()
         json_send(conn, {"durum": "ok", "is_id": job_id, "toplam_boyut": total, "avml_yol": avml})
@@ -590,8 +615,6 @@ class LinuxAgentController:
         ]
 
         label = self.t["progress_ram"]
-
-        self._set_job_state(job_id, "running")
 
         try:
             last_err = ""
