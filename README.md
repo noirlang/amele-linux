@@ -17,6 +17,20 @@ wget -O worm-linux https://worm.noirlang.tr/worm-linux
 chmod +x worm-linux
 ```
 
+### Linux Binary Derleme
+
+```bash
+python -m venv /tmp/worm-linux-build-venv
+/tmp/worm-linux-build-venv/bin/pip install pyinstaller
+/tmp/worm-linux-build-venv/bin/pyinstaller --onefile --name worm-linux --distpath dist --workpath build --specpath build linux.py
+```
+
+Cikti dosyasi:
+
+```text
+dist/worm-linux
+```
+
 ### Calistirma
 
 ```bash
@@ -45,6 +59,20 @@ This repository contains the Linux Agent component for the Worm main application
 ```bash
 wget -O worm-linux https://worm.noirlang.tr/worm-linux
 chmod +x worm-linux
+```
+
+### Build Linux Binary
+
+```bash
+python -m venv /tmp/worm-linux-build-venv
+/tmp/worm-linux-build-venv/bin/pip install pyinstaller
+/tmp/worm-linux-build-venv/bin/pyinstaller --onefile --name worm-linux --distpath dist --workpath build --specpath build linux.py
+```
+
+Output:
+
+```text
+dist/worm-linux
 ```
 
 ### Run

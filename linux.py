@@ -297,6 +297,20 @@ class LinuxAgentController:
         if not job_id or not action:
             return False, "is_id ve eylem gerekli"
         action = str(action).strip().lower()
+        action_aliases = {
+            "duraklat": "pause",
+            "pause": "pause",
+            "beklet": "pause",
+            "devam": "resume",
+            "resume": "resume",
+            "surdur": "resume",
+            "sürdür": "resume",
+            "durdur": "stop",
+            "stop": "stop",
+            "iptal": "stop",
+            "cancel": "stop",
+        }
+        action = action_aliases.get(action, action)
         if action not in {"pause", "resume", "stop"}:
             return False, "Desteklenmeyen eylem"
 
@@ -427,10 +441,10 @@ class LinuxAgentController:
             json_send(conn, {"tur": "hata", "mesaj": "Disk size could not be read"})
             return
 
+        self._set_job_state(job_id, "running")
+
         json_send(conn, {"durum": "ok", "is_id": job_id, "tahmini_boyut": total_size})
         json_send(conn, {"tur": "veri_basliyor", "is_id": job_id, "toplam": total_size})
-
-        self._set_job_state(job_id, "running")
 
         sha256 = hashlib.sha256()
         md5 = hashlib.md5()
@@ -488,7 +502,7 @@ class LinuxAgentController:
             json_send(conn, {
                 "tur": "hata",
                 "is_id": job_id,
-                "mesaj": "Image transfer interrupted",
+                "mesaj": "Image transfer stopped by user" if self._get_job_state(job_id) == "stopped" else "Image transfer interrupted",
                 "okunan": sent,
                 "toplam": total_size,
             })
@@ -791,7 +805,7 @@ class LinuxAgentController:
 
                 elif cmd == "edinim_kontrol":
                     job_id = message.get("is_id", "")
-                    action = message.get("eylem", "")
+                    action = message.get("eylem", "") or message.get("action", "")
                     ok, msg = self._control_job(job_id, action)
                     json_send(conn, {
                         "durum": "ok" if ok else "hata",
