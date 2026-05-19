@@ -333,24 +333,131 @@ class LinuxAgentController:
         except Exception:
             return ""
 
-    def _select_ram_output_path(self, requested_name):
+    def _format_bytes(self, value):
+        try:
+            value = float(value or 0)
+        except Exception:
+            value = 0.0
+        units = ["B", "KB", "MB", "GB", "TB"]
+        idx = 0
+        while value >= 1024 and idx < len(units) - 1:
+            value /= 1024
+            idx += 1
+        if idx == 0:
+            return f"{int(value)} {units[idx]}"
+        return f"{value:.1f} {units[idx]}"
+
+    def _dir_free_bytes(self, path):
+        try:
+            return shutil.disk_usage(path).free
+        except Exception:
+            return 0
+
+    def _dir_is_writable(self, path):
+        probe = os.path.join(path, ".worm-write-test")
+        try:
+            with open(probe, "ab"):
+                pass
+            os.remove(probe)
+            return True
+        except Exception:
+            try:
+                if os.path.exists(probe):
+                    os.remove(probe)
+            except Exception:
+                pass
+            return False
+
+    def _preallocate_probe(self, directory, required_bytes):
+        if not required_bytes:
+            return ""
+        probe = os.path.join(directory, ".worm-ram-space-test")
+        try:
+            with open(probe, "wb") as f:
+                if hasattr(os, "posix_fallocate"):
+                    os.posix_fallocate(f.fileno(), 0, required_bytes)
+                else:
+                    f.truncate(required_bytes)
+            return ""
+        except OSError as exc:
+            return f"{directory}: ayrilmis alan testi basarisiz ({exc})"
+        except Exception as exc:
+            return f"{directory}: ayrilmis alan testi basarisiz ({exc})"
+        finally:
+            try:
+                if os.path.exists(probe):
+                    os.remove(probe)
+            except Exception:
+                pass
+
+    def _select_ram_output_path(self, requested_name, required_bytes=0):
         base = os.path.basename(requested_name or "memory_dump_linux.raw")
         if not base:
             base = "memory_dump_linux.raw"
 
-        script_fs = self._fs_type(self.script_dir)
-        risky = {"vfat", "msdos", "fuseblk"}
+        risky_fs = {"vfat", "msdos", "fat", "fuseblk"}
+        large_dump = required_bytes >= 4 * 1024 * 1024 * 1024
+        free_margin = max(512 * 1024 * 1024, int(required_bytes * 0.05)) if required_bytes else 0
+        needed = required_bytes + free_margin if required_bytes else 0
+        candidates = [
+            self.script_dir,
+            "/var/tmp/Worm/ram",
+            "/tmp/Worm/ram",
+        ]
+        skipped = []
 
-        # 4GB-1 sinirina takilabilecek FS tiplerinden kac.
-        if script_fs in risky:
-            safe_dir = "/var/tmp/Worm/ram"
+        for directory in candidates:
             try:
-                os.makedirs(safe_dir, exist_ok=True)
-                return os.path.join(safe_dir, base)
-            except Exception:
-                pass
+                os.makedirs(directory, exist_ok=True)
+            except Exception as exc:
+                skipped.append(f"{directory}: olusturulamadi ({exc})")
+                continue
 
-        return os.path.join(self.script_dir, base)
+            fs_type = self._fs_type(directory)
+            free_bytes = self._dir_free_bytes(directory)
+            if large_dump and fs_type in risky_fs:
+                skipped.append(f"{directory}: {fs_type or 'unknown'} 4GB ustu RAM dump icin riskli")
+                continue
+            if needed and free_bytes and free_bytes < needed:
+                skipped.append(
+                    f"{directory}: bos alan yetersiz ({self._format_bytes(free_bytes)} / gerekli {self._format_bytes(needed)})"
+                )
+                continue
+            if not self._dir_is_writable(directory):
+                skipped.append(f"{directory}: yazilabilir degil")
+                continue
+            prealloc_error = self._preallocate_probe(directory, required_bytes)
+            if prealloc_error:
+                skipped.append(prealloc_error)
+                continue
+
+            return os.path.join(directory, base), ""
+
+        details = "; ".join(skipped) if skipped else "uygun klasor bulunamadi"
+        message = (
+            "RAM dump icin uygun cikti klasoru bulunamadi. "
+            f"Gerekli alan: {self._format_bytes(needed or required_bytes)}. "
+            "Btrfs quota/subvolume limiti, yetersiz bos alan veya 4GB limitli dosya sistemi buna sebep olabilir. "
+            f"Detay: {details}"
+        )
+        return "", message
+
+    def _ram_output_diagnostics(self, output_file, final_size=0, total=0):
+        directory = os.path.dirname(output_file) or "."
+        fs_type = self._fs_type(directory) or "unknown"
+        free_bytes = self._dir_free_bytes(directory)
+        parts = [
+            f"output_fs={fs_type}",
+            f"output_dir={directory}",
+            f"free={self._format_bytes(free_bytes)}",
+        ]
+        if final_size:
+            parts.append(f"partial={self._format_bytes(final_size)}")
+        if total:
+            parts.append(f"ram={self._format_bytes(total)}")
+        if fs_type == "btrfs":
+            parts.append("btrfs_notu=quota/subvolume metadata alani df ciktisindan once dolabilir")
+        return ", ".join(parts)
 
     def _show_progress(self, label, done, total):
         if total <= 0:
@@ -724,10 +831,11 @@ class LinuxAgentController:
 
             self._finish_progress()
             self.log(f"RAM acquisition failed: {output_file} ({final_size} bytes, rc={last_rc})")
+            diagnostics = self._ram_output_diagnostics(output_file, final_size, total)
             json_send(conn, {
                 "tur": "hata",
                 "is_id": job_id,
-                "mesaj": f"AVML error: {last_err or last_rc} | partial_size={final_size}",
+                "mesaj": f"AVML error: {last_err or last_rc} | {diagnostics}",
                 "kod": "AVML_ERROR",
             })
         except Exception as e:
@@ -816,7 +924,15 @@ class LinuxAgentController:
                 elif cmd == "ram_edinim_baslat":
                     job_id = message.get("is_id") or ("RAM_" + str(int(time.time())))
                     output_file = os.path.basename(message.get("cikti_dosya", "memory_dump_linux.raw"))
-                    output_path = self._select_ram_output_path(output_file)
+                    output_path, output_error = self._select_ram_output_path(output_file, calc_mem_total_bytes())
+                    if output_error:
+                        json_send(conn, {
+                            "tur": "hata",
+                            "is_id": job_id,
+                            "mesaj": output_error,
+                            "kod": "RAM_OUTPUT_UNAVAILABLE",
+                        })
+                        continue
                     self.ram_output_index[output_file] = output_path
                     self._ram_acquire_avml(conn, output_path, job_id)
 
