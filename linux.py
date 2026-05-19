@@ -97,6 +97,12 @@ def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def app_base_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def load_os_release():
     data = {}
     try:
@@ -268,7 +274,7 @@ class LinuxAgentController:
         self.port = port
         self.sock = None
         self.running = False
-        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.script_dir = app_base_dir()
         self.avml_path = avml_path
         self._progress_lock = threading.Lock()
         self.ram_output_index = {}
@@ -459,6 +465,27 @@ class LinuxAgentController:
             parts.append("btrfs_notu=quota/subvolume metadata alani df ciktisindan once dolabilir")
         return ", ".join(parts)
 
+    def _cleanup_transferred_file(self, file_path, index_key=""):
+        target = os.path.abspath(file_path)
+        try:
+            if os.path.exists(target):
+                os.remove(target)
+                self.log(f"Transferred file deleted from agent: {target}")
+        except Exception as exc:
+            self.log(f"Transferred file could not be deleted from agent: {target} ({exc})")
+            return
+
+        for key, value in list(self.ram_output_index.items()):
+            if key == index_key or os.path.abspath(value) == target:
+                self.ram_output_index.pop(key, None)
+
+        tmp_dir = os.path.join(os.path.dirname(target), ".tmp")
+        try:
+            if os.path.isdir(tmp_dir) and not os.listdir(tmp_dir):
+                os.rmdir(tmp_dir)
+        except Exception:
+            pass
+
     def _show_progress(self, label, done, total):
         if total <= 0:
             return
@@ -616,7 +643,7 @@ class LinuxAgentController:
 
         self._clear_job_state(job_id)
 
-    def _stream_file(self, conn, file_path, job_id):
+    def _stream_file(self, conn, file_path, job_id, delete_after_success=False, index_key=""):
         if not os.path.exists(file_path):
             json_send(conn, {"durum": "hata", "is_id": job_id, "mesaj": f"File not found: {file_path}"})
             return
@@ -673,6 +700,8 @@ class LinuxAgentController:
                 "sha256": sha256.hexdigest(),
                 "mesaj": "File transfer completed",
             })
+            if delete_after_success:
+                self._cleanup_transferred_file(file_path, index_key)
         else:
             self._finish_progress()
             self.log(f"File transfer interrupted: {file_path} ({sent}/{total} bytes)")
@@ -715,6 +744,17 @@ class LinuxAgentController:
         json_send(conn, {"tur": "veri_basliyor", "is_id": job_id, "toplam": total})
 
         self.log(f"RAM output path: {output_file}")
+        ram_work_dir = os.path.dirname(output_file) or self.script_dir
+        avml_tmp_dir = os.path.join(ram_work_dir, ".tmp")
+        try:
+            os.makedirs(avml_tmp_dir, exist_ok=True)
+        except Exception:
+            avml_tmp_dir = ram_work_dir
+        avml_env = os.environ.copy()
+        avml_env["TMPDIR"] = avml_tmp_dir
+        avml_env["TMP"] = avml_tmp_dir
+        avml_env["TEMP"] = avml_tmp_dir
+        self.log(f"AVML temp path: {avml_tmp_dir}")
 
         cmd_candidates = [
             [avml, output_file],
@@ -736,7 +776,7 @@ class LinuxAgentController:
                 except Exception:
                     pass
 
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=avml_env)
                 last_report = 0.0
                 was_paused = False
 
@@ -940,7 +980,7 @@ class LinuxAgentController:
                     job_id = message.get("is_id") or ("RAMDL_" + str(int(time.time())))
                     file_name = os.path.basename(message.get("dosya", "memory_dump_linux.raw"))
                     full = self.ram_output_index.get(file_name, os.path.join(self.script_dir, file_name))
-                    self._stream_file(conn, full, job_id)
+                    self._stream_file(conn, full, job_id, delete_after_success=True, index_key=file_name)
 
                 elif cmd == "edinim_kontrol":
                     job_id = message.get("is_id", "")
@@ -991,7 +1031,7 @@ def startup_wizard():
         print(t["invalid_port"])
         port = DEFAULT_PORT
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = app_base_dir()
     os_info = load_os_release()
     distro = os_info.get("PRETTY_NAME", os_info.get("ID", "unknown"))
     print(f"{t['distro']} {distro}")
