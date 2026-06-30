@@ -84,12 +84,10 @@ jobs:
         run: test -x dist/amele-linux
 
       - name: Name asset from commit
-        env:
-          ASSET_SUFFIX: ${{ needs.metadata.outputs.asset_suffix }}
         run: |
           mkdir -p release-assets
           cp dist/amele-linux \
-            "release-assets/amele-linux-${ASSET_SUFFIX}-linux-x64"
+            "release-assets/amele-linux"
 
       - name: Upload binary
         uses: actions/upload-artifact@v7
@@ -117,13 +115,12 @@ jobs:
 
       - name: Create checksums and release notes
         env:
-          ASSET_SUFFIX: ${{ needs.metadata.outputs.asset_suffix }}
           RELEASE_TITLE: ${{ needs.metadata.outputs.release_title }}
         shell: bash
         run: |
           set -euo pipefail
           cd release-assets
-          sha256sum amele-linux-* > "amele-linux-${ASSET_SUFFIX}-SHA256SUMS.txt"
+          sha256sum amele-linux > "amele-linux-SHA256SUMS.txt"
           cd ..
           cat > release-notes.md <<EOF
           Automated development release for **${RELEASE_TITLE}**.
