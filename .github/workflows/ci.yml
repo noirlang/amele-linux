@@ -39,14 +39,14 @@ jobs:
         run: python -m py_compile linux.py
 
       - name: Build binary
-        run: pyinstaller --noconfirm --onefile --name worm-linux --distpath dist --workpath build --specpath build linux.py
+        run: pyinstaller --noconfirm --onefile --name amele-linux --distpath dist --workpath build --specpath build linux.py
 
       - name: Verify binary exists
-        run: test -x dist/worm-linux
+        run: test -x dist/amele-linux
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: worm-linux-x64
-          path: dist/worm-linux
+          name: amele-linux-x64
+          path: dist/amele-linux
           if-no-files-found: error
