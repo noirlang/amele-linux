@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Worm Linux Agent v0.0.1
+Amele Linux Agent v0.0.1
 - TUI startup wizard
 - Remote disk imaging protocol compatible with controller
 - AVML check/install guidance + RAM acquisition over protocol
@@ -29,7 +29,7 @@ AVML_DIRECT_URL = "https://github.com/microsoft/avml/releases/latest/download/av
 
 
 TR = {
-    "banner": "Worm Linux Agent (TUI)",
+    "banner": "Amele Linux Agent (TUI)",
     "ask_lang": "Dil secin [tr/en] (varsayilan: tr): ",
     "ask_sec": "Guvenlik parolasi kullanilsin mi? [E/h]: ",
     "ask_pw": "Guvenlik parolasi: ",
@@ -61,7 +61,7 @@ TR = {
 }
 
 EN = {
-    "banner": "Worm Linux Agent (TUI)",
+    "banner": "Amele Linux Agent (TUI)",
     "ask_lang": "Select language [tr/en] (default: tr): ",
     "ask_sec": "Enable security password? [Y/n]: ",
     "ask_pw": "Security password: ",
@@ -360,7 +360,7 @@ class LinuxAgentController:
             return 0
 
     def _dir_is_writable(self, path):
-        probe = os.path.join(path, ".worm-write-test")
+        probe = os.path.join(path, ".amele-write-test")
         try:
             with open(probe, "ab"):
                 pass
@@ -377,7 +377,7 @@ class LinuxAgentController:
     def _preallocate_probe(self, directory, required_bytes):
         if not required_bytes:
             return ""
-        probe = os.path.join(directory, ".worm-ram-space-test")
+        probe = os.path.join(directory, ".amele-ram-space-test")
         try:
             with open(probe, "wb") as f:
                 if hasattr(os, "posix_fallocate"):
@@ -407,8 +407,8 @@ class LinuxAgentController:
         needed = required_bytes + free_margin if required_bytes else 0
         candidates = [
             self.script_dir,
-            "/var/tmp/Worm/ram",
-            "/tmp/Worm/ram",
+            "/var/tmp/Amele/ram",
+            "/tmp/Amele/ram",
         ]
         skipped = []
 
