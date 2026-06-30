@@ -1,6 +1,10 @@
+<div align="center">
+<img src="https://amele.noirlang.tr/amele.png" alt="Amele Logo" width="120" />
+
 # Amele Linux Agent
 
 ![Amele Linux Agent Demo](linux.gif)
+</div>
 
 ## Turkce
 
