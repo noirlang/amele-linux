@@ -936,8 +936,10 @@ class LinuxAgentController:
 
                 elif cmd == "imaj_baslat":
                     disk_id = message.get("disk_id", "")
+                    fmt = message.get("format", "raw")
                     chunk_size = int(message.get("parca_boyutu", 4 * 1024 * 1024))
                     job_id = message.get("is_id") or ("IMG_" + str(int(time.time())))
+                    self.log(f"Starting disk acquisition for {disk_id} in {fmt} format")
                     self._stream_disk(conn, disk_id, chunk_size, job_id)
 
                 elif cmd == "winpmem_kontrol":
@@ -963,7 +965,9 @@ class LinuxAgentController:
 
                 elif cmd == "ram_edinim_baslat":
                     job_id = message.get("is_id") or ("RAM_" + str(int(time.time())))
+                    fmt = message.get("format", "raw")
                     output_file = os.path.basename(message.get("cikti_dosya", "memory_dump_linux.raw"))
+                    self.log(f"Starting RAM acquisition for {output_file} in {fmt} format")
                     output_path, output_error = self._select_ram_output_path(output_file, calc_mem_total_bytes())
                     if output_error:
                         json_send(conn, {
