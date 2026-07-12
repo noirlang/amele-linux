@@ -26,6 +26,7 @@ BUFFER_SIZE = 1024 * 1024
 AVML_BIN_NAME = "avml"
 AVML_RELEASE_URL = "https://github.com/microsoft/avml/releases"
 AVML_DIRECT_URL = "https://github.com/microsoft/avml/releases/latest/download/avml"
+SUPPORTED_OUTPUT_FORMATS = {"raw", "aff4"}
 
 
 TR = {
@@ -129,6 +130,15 @@ def is_yes(answer, lang):
 
 def json_send(conn, payload):
     conn.sendall(json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n")
+
+
+def normalize_output_format(value):
+    fmt = str(value or "raw").strip().lower()
+    if fmt in {"dd", "img"}:
+        fmt = "raw"
+    if fmt not in SUPPORTED_OUTPUT_FORMATS:
+        return "", f"Unsupported output format: {fmt}. Supported formats: raw, aff4"
+    return fmt, ""
 
 
 def calc_mem_total_bytes():
@@ -562,23 +572,23 @@ class LinuxAgentController:
 
         return True, ""
 
-    def _stream_disk(self, conn, disk_id, chunk_size, job_id):
+    def _stream_disk(self, conn, disk_id, chunk_size, job_id, output_format="raw"):
         disk_path = resolve_disk_path(disk_id)
 
         if not os.path.exists(disk_path):
-            json_send(conn, {"tur": "hata", "mesaj": f"Disk not found: {disk_path}"})
+            json_send(conn, {"tur": "hata", "format": output_format, "mesaj": f"Disk not found: {disk_path}"})
             return
 
         total_size = disk_size_bytes_linux(disk_path)
 
         if total_size <= 0:
-            json_send(conn, {"tur": "hata", "mesaj": "Disk size could not be read"})
+            json_send(conn, {"tur": "hata", "format": output_format, "mesaj": "Disk size could not be read"})
             return
 
         self._set_job_state(job_id, "running")
 
-        json_send(conn, {"durum": "ok", "is_id": job_id, "tahmini_boyut": total_size})
-        json_send(conn, {"tur": "veri_basliyor", "is_id": job_id, "toplam": total_size})
+        json_send(conn, {"durum": "ok", "is_id": job_id, "format": output_format, "tahmini_boyut": total_size})
+        json_send(conn, {"tur": "veri_basliyor", "is_id": job_id, "format": output_format, "toplam": total_size})
 
         sha256 = hashlib.sha256()
         md5 = hashlib.md5()
@@ -627,6 +637,7 @@ class LinuxAgentController:
             json_send(conn, {
                 "tur": "bitti",
                 "is_id": job_id,
+                "format": output_format,
                 "sha256": sha256.hexdigest(),
                 "md5": md5.hexdigest(),
             })
@@ -636,6 +647,7 @@ class LinuxAgentController:
             json_send(conn, {
                 "tur": "hata",
                 "is_id": job_id,
+                "format": output_format,
                 "mesaj": "Image transfer stopped by user" if self._get_job_state(job_id) == "stopped" else "Image transfer interrupted",
                 "okunan": sent,
                 "toplam": total_size,
@@ -709,17 +721,17 @@ class LinuxAgentController:
 
         self._clear_job_state(job_id)
 
-    def _ram_acquire_avml(self, conn, output_file, job_id):
+    def _ram_acquire_avml(self, conn, output_file, job_id, output_format="raw"):
         self._set_job_state(job_id, "running")
 
         if os.geteuid() != 0:
-            json_send(conn, {"tur": "hata", "is_id": job_id, "mesaj": self.t["ram_need_root"], "kod": "ROOT_REQUIRED"})
+            json_send(conn, {"tur": "hata", "is_id": job_id, "format": output_format, "mesaj": self.t["ram_need_root"], "kod": "ROOT_REQUIRED"})
             self._clear_job_state(job_id)
             return
 
         avml = self.avml_path or find_avml(self.script_dir)
         if not avml:
-            json_send(conn, {"tur": "hata", "is_id": job_id, "mesaj": "AVML not found", "kod": "AVML_NOT_FOUND"})
+            json_send(conn, {"tur": "hata", "is_id": job_id, "format": output_format, "mesaj": "AVML not found", "kod": "AVML_NOT_FOUND"})
             self._clear_job_state(job_id)
             return
 
@@ -733,6 +745,7 @@ class LinuxAgentController:
             json_send(conn, {
                 "tur": "hata",
                 "is_id": job_id,
+                "format": output_format,
                 "mesaj": "RAM acquisition stopped by user",
                 "kod": "STOPPED_BY_USER",
             })
@@ -740,8 +753,8 @@ class LinuxAgentController:
             return
 
         total = calc_mem_total_bytes()
-        json_send(conn, {"durum": "ok", "is_id": job_id, "toplam_boyut": total, "avml_yol": avml})
-        json_send(conn, {"tur": "veri_basliyor", "is_id": job_id, "toplam": total})
+        json_send(conn, {"durum": "ok", "is_id": job_id, "format": output_format, "toplam_boyut": total, "avml_yol": avml})
+        json_send(conn, {"tur": "veri_basliyor", "is_id": job_id, "format": output_format, "toplam": total})
 
         self.log(f"RAM output path: {output_file}")
         ram_work_dir = os.path.dirname(output_file) or self.script_dir
@@ -816,6 +829,7 @@ class LinuxAgentController:
                         json_send(conn, {
                             "tur": "ilerleme",
                             "is_id": job_id,
+                            "format": output_format,
                             "okunan": current,
                             "toplam": total,
                             "yuzde": pct,
@@ -834,6 +848,7 @@ class LinuxAgentController:
                     json_send(conn, {
                         "tur": "hata",
                         "is_id": job_id,
+                        "format": output_format,
                         "mesaj": f"RAM acquisition stopped by user | partial_size={final_size}",
                         "kod": "STOPPED_BY_USER",
                     })
@@ -855,6 +870,7 @@ class LinuxAgentController:
                     json_send(conn, {
                         "tur": "bitti",
                         "is_id": job_id,
+                        "format": output_format,
                         "boyut": final_size,
                         "sha256": sha256.hexdigest(),
                         "mesaj": "RAM acquisition completed",
@@ -875,12 +891,13 @@ class LinuxAgentController:
             json_send(conn, {
                 "tur": "hata",
                 "is_id": job_id,
+                "format": output_format,
                 "mesaj": f"AVML error: {last_err or last_rc} | {diagnostics}",
                 "kod": "AVML_ERROR",
             })
         except Exception as e:
             self._finish_progress()
-            json_send(conn, {"tur": "hata", "is_id": job_id, "mesaj": str(e), "kod": "EXCEPTION"})
+            json_send(conn, {"tur": "hata", "is_id": job_id, "format": output_format, "mesaj": str(e), "kod": "EXCEPTION"})
         finally:
             self._clear_job_state(job_id)
 
@@ -936,11 +953,14 @@ class LinuxAgentController:
 
                 elif cmd == "imaj_baslat":
                     disk_id = message.get("disk_id", "")
-                    fmt = message.get("format", "raw")
+                    fmt, format_error = normalize_output_format(message.get("format", "raw"))
+                    if format_error:
+                        json_send(conn, {"durum": "hata", "mesaj": format_error, "kod": "UNSUPPORTED_FORMAT"})
+                        continue
                     chunk_size = int(message.get("parca_boyutu", 4 * 1024 * 1024))
                     job_id = message.get("is_id") or ("IMG_" + str(int(time.time())))
                     self.log(f"Starting disk acquisition for {disk_id} in {fmt} format")
-                    self._stream_disk(conn, disk_id, chunk_size, job_id)
+                    self._stream_disk(conn, disk_id, chunk_size, job_id, fmt)
 
                 elif cmd == "winpmem_kontrol":
                     json_send(conn, {
@@ -965,7 +985,10 @@ class LinuxAgentController:
 
                 elif cmd == "ram_edinim_baslat":
                     job_id = message.get("is_id") or ("RAM_" + str(int(time.time())))
-                    fmt = message.get("format", "raw")
+                    fmt, format_error = normalize_output_format(message.get("format", "raw"))
+                    if format_error:
+                        json_send(conn, {"durum": "hata", "is_id": job_id, "mesaj": format_error, "kod": "UNSUPPORTED_FORMAT"})
+                        continue
                     output_file = os.path.basename(message.get("cikti_dosya", "memory_dump_linux.raw"))
                     self.log(f"Starting RAM acquisition for {output_file} in {fmt} format")
                     output_path, output_error = self._select_ram_output_path(output_file, calc_mem_total_bytes())
@@ -973,12 +996,13 @@ class LinuxAgentController:
                         json_send(conn, {
                             "tur": "hata",
                             "is_id": job_id,
+                            "format": fmt,
                             "mesaj": output_error,
                             "kod": "RAM_OUTPUT_UNAVAILABLE",
                         })
                         continue
                     self.ram_output_index[output_file] = output_path
-                    self._ram_acquire_avml(conn, output_path, job_id)
+                    self._ram_acquire_avml(conn, output_path, job_id, fmt)
 
                 elif cmd == "ram_dosya_indir":
                     job_id = message.get("is_id") or ("RAMDL_" + str(int(time.time())))
