@@ -315,6 +315,23 @@ def docker_get_status():
         except Exception:
             pass
 
+    if count == 0 and is_running:
+        try:
+            out = subprocess.run(["docker", "ps", "-a", "--format", "{{.Status}}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+            if out.returncode == 0:
+                lines = [l.strip() for l in out.stdout.strip().splitlines() if l.strip()]
+                count = len(lines)
+                for l in lines:
+                    if l.lower().startswith("up"):
+                        running += 1
+                    elif "paused" in l.lower():
+                        paused += 1
+                    else:
+                        stopped += 1
+                is_avail = True
+        except Exception:
+            pass
+
     return {
         "docker_mevcut": is_avail,
         "docker_calisiyor": is_running,
@@ -328,51 +345,47 @@ def docker_get_status():
 
 
 def docker_evaluate_risk(config_v2, host_config, mounts):
-    score = 0
     reasons = []
+    score = 0
 
-    if host_config.get("Privileged"):
+    priv = bool(host_config.get("Privileged"))
+    if priv:
+        reasons.append("Konteyner tam yetkili (Privileged) modda çalışıyor (Kritik Host Ele Geçirme Riski).")
         score += 50
-        reasons.append("Konteyner tam yetkili (--privileged) modda çalışıyor.")
 
     for m in mounts:
         src = m.get("source", "")
         dst = m.get("destination", "")
         if "docker.sock" in src or "docker.sock" in dst:
-            score += 50
             reasons.append("Host Docker soketi (/var/run/docker.sock) konteyner içine mount edilmiş (DoD Escape riski).")
-            break
+            score += 40
+        if src in {"/", "/etc", "/root", "/var/run", "/proc", "/sys"} and m.get("rw"):
+            reasons.append(f"Kritik host dizini ({src}) yazılabilir (RW) olarak konteynere mount edilmiş.")
+            score += 35
 
-    for m in mounts:
-        src = m.get("source", "")
-        if src in ["/", "/etc", "/root", "/home", "/proc", "/sys"]:
-            score += 30
-            reasons.append(f"Kritik host dizini doğrudan bağlı: {src} -> {m.get('destination')}")
+    caps = host_config.get("CapAdd") or []
+    danger_caps = {"CAP_SYS_ADMIN", "CAP_SYS_PTRACE", "CAP_SYS_RAWIO", "CAP_DAC_OVERRIDE", "SYS_ADMIN", "SYS_PTRACE"}
+    for c in caps:
+        if c.upper() in danger_caps:
+            reasons.append(f"Tehlikeli Linux Capability tespit edildi: {c}")
+            score += 25
 
-    if host_config.get("NetworkMode") == "host":
-        score += 20
-        reasons.append("Host ağ ad alanı (NetworkMode: host) doğrudan kullanılıyor.")
-    if host_config.get("PidMode") == "host":
-        score += 25
-        reasons.append("Host süreç ad alanı (PidMode: host) paylaşılıyor.")
-    if host_config.get("IpcMode") == "host":
+    pid_mode = str(host_config.get("PidMode", ""))
+    if pid_mode.lower() == "host":
+        reasons.append("Host PID alanı paylaşılıyor (Host Process Injection riski).")
+        score += 30
+
+    net_mode = str(host_config.get("NetworkMode", ""))
+    if net_mode.lower() == "host":
+        reasons.append("Host Network alanı paylaşılıyor (Host Port Sniffing riski).")
         score += 15
-        reasons.append("Host IPC ad alanı (IpcMode: host) paylaşılıyor.")
 
-    for cap in host_config.get("CapAdd") or []:
-        if cap in ["SYS_ADMIN", "ALL", "NET_ADMIN", "SYS_PTRACE"]:
-            score += 20
-            reasons.append(f"Tehlikeli Linux yetkisi eklenmiş: {cap}")
+    user_val = (config_v2.get("Config") or {}).get("User") or config_v2.get("User") or ""
+    if not user_val or user_val == "0" or user_val == "root":
+        reasons.append("Konteyner doğrudan ROOT kullanıcısı ile çalışıyor.")
+        score += 10
 
-    if host_config.get("AppArmorProfile") == "unconfined":
-        score += 15
-        reasons.append("AppArmor koruması devre dışı bırakılmış (unconfined).")
-    for opt in host_config.get("SecurityOpt") or []:
-        if "seccomp=unconfined" in opt:
-            score += 15
-            reasons.append("Seccomp filtreleri devre dışı (unconfined).")
-
-    if score >= 50:
+    if score >= 60:
         level = "CRITICAL"
     elif score >= 30:
         level = "HIGH"
@@ -386,135 +399,162 @@ def docker_evaluate_risk(config_v2, host_config, mounts):
 
 def docker_scan_secrets(env_list):
     secrets = []
-    keywords = [
-        ("PASSWORD", "Password / Credential"),
-        ("PASSWD", "Password / Credential"),
-        ("SECRET", "Secret Key / Salt"),
-        ("TOKEN", "Access / Bearer Token"),
-        ("API_KEY", "API Key"),
-        ("APIKEY", "API Key"),
-        ("PRIVATE_KEY", "Private Key"),
-        ("ACCESS_KEY", "Cloud Access Key"),
-        ("AUTH", "Auth Credentials"),
-        ("JWT", "JSON Web Token"),
-        ("DB_PASS", "Database Password"),
+    if not env_list:
+        return secrets
+
+    patterns = [
+        ("API_KEY", "API / Token Anahtari"),
+        ("SECRET", "Secret / Gizli Anahtar"),
+        ("PASSWORD", "Parola / Sifre"),
+        ("PASS", "Parola / Sifre"),
+        ("TOKEN", "Guvenlik Belirteci (Token)"),
+        ("PRIVATE_KEY", "Ozel Anahtar (Private Key)"),
+        ("AWS_ACCESS_KEY", "Bulut Erisim Anahtari (AWS)"),
+        ("DB_PASS", "Veritabani Parolasi"),
     ]
-    for item in env_list:
-        if "=" in item:
-            k, v = item.split("=", 1)
-            uk = k.upper()
-            for kw, kind in keywords:
-                if kw in uk and v.strip():
-                    preview = "******" if len(v) <= 6 else (v[:2] + "..." + v[-2:])
-                    secrets.append({"key": k, "value_preview": preview, "secret_type": kind})
-                    break
+
+    for env in env_list:
+        if "=" not in env:
+            continue
+        k, v = env.split("=", 1)
+        k_upper = k.upper()
+        if len(v.strip()) < 3:
+            continue
+        for p, kind in patterns:
+            if p in k_upper:
+                masked = v[:2] + "..." + v[-2:] if len(v) > 4 else "***"
+                secrets.append({
+                    "key": k,
+                    "value_preview": masked,
+                    "secret_type": kind
+                })
+                break
     return secrets
 
 
 def docker_list_containers():
     root = "/var/lib/docker/containers"
-    if not os.path.exists(root):
-        return []
-
     res = []
-    for item in os.listdir(root):
-        c_dir = os.path.join(root, item)
-        if not os.path.isdir(c_dir) or len(item) < 12:
-            continue
 
-        cfg_file = os.path.join(c_dir, "config.v2.json")
-        host_file = os.path.join(c_dir, "hostconfig.json")
+    if os.path.exists(root):
+        try:
+            for item in os.listdir(root):
+                c_dir = os.path.join(root, item)
+                if not os.path.isdir(c_dir) or len(item) < 12:
+                    continue
 
-        config_v2 = {}
-        host_config = {}
+                cfg_file = os.path.join(c_dir, "config.v2.json")
+                host_file = os.path.join(c_dir, "hostconfig.json")
 
-        if os.path.exists(cfg_file):
-            try:
-                with open(cfg_file, "r", encoding="utf-8") as f:
-                    config_v2 = json.load(f)
-            except Exception:
-                pass
+                config_v2 = {}
+                host_config = {}
 
-        if os.path.exists(host_file):
-            try:
-                with open(host_file, "r", encoding="utf-8") as f:
-                    host_config = json.load(f)
-            except Exception:
-                pass
+                if os.path.exists(cfg_file):
+                    try:
+                        with open(cfg_file, "r", encoding="utf-8") as f:
+                            config_v2 = json.load(f)
+                    except Exception:
+                        pass
 
-        c_name = config_v2.get("Name", "").lstrip("/") or "unnamed"
-        img = (config_v2.get("Config") or {}).get("Image") or config_v2.get("Image") or "unknown"
-        created = config_v2.get("Created", "")
-        st = config_v2.get("State", {})
-        running = bool(st.get("Running"))
-        pid = int(st.get("Pid") or 0)
-        exit_code = int(st.get("ExitCode") or 0)
+                if os.path.exists(host_file):
+                    try:
+                        with open(host_file, "r", encoding="utf-8") as f:
+                            host_config = json.load(f)
+                    except Exception:
+                        pass
 
-        if running:
-            state_str = "running"
-        elif st.get("Paused"):
-            state_str = "paused"
-        elif st.get("Restarting"):
-            state_str = "restarting"
-        else:
-            state_str = "exited"
+                c_name = config_v2.get("Name", "").lstrip("/") or "unnamed"
+                img = (config_v2.get("Config") or {}).get("Image") or config_v2.get("Image") or "unknown"
+                created = config_v2.get("Created", "")
+                st = config_v2.get("State", {})
+                running = bool(st.get("Running"))
+                pid = int(st.get("Pid") or 0)
+                exit_code = int(st.get("ExitCode") or 0)
 
-        gd = (config_v2.get("GraphDriver") or {}).get("Data") or {}
-        upper_dir = gd.get("UpperDir")
-        merged_dir = gd.get("MergedDir")
-        work_dir = gd.get("WorkDir")
+                if running:
+                    state_str = "running"
+                elif st.get("Paused"):
+                    state_str = "paused"
+                elif st.get("Restarting"):
+                    state_str = "restarting"
+                else:
+                    state_str = "exited"
 
-        log_candidate = os.path.join(c_dir, f"{item}-json.log")
-        log_path = log_candidate if os.path.exists(log_candidate) else None
+                gdata = (config_v2.get("GraphDriver") or {}).get("Data") or {}
+                upper_dir = gdata.get("UpperDir")
+                merged_dir = gdata.get("MergedDir")
+                work_dir = gdata.get("WorkDir")
 
-        ip_addr = (config_v2.get("NetworkSettings") or {}).get("IPAddress") or None
+                log_path = config_v2.get("LogPath")
+                if not log_path and os.path.exists(os.path.join(c_dir, f"{item}-json.log")):
+                    log_path = os.path.join(c_dir, f"{item}-json.log")
 
-        ports = []
-        for cport, binds in (host_config.get("PortBindings") or {}).items():
-            for b in binds or []:
-                hp = b.get("HostPort", "")
-                hip = b.get("HostIp", "") or "0.0.0.0"
-                ports.append(f"{hip}:{hp} -> {cport}")
+                net = config_v2.get("NetworkSettings") or {}
+                ip_addr = net.get("IPAddress") or None
 
-        mounts = []
-        for _, mval in (config_v2.get("MountPoints") or {}).items():
-            mounts.append({
-                "source": mval.get("Source", ""),
-                "destination": mval.get("Destination", ""),
-                "mode": mval.get("Mode", ""),
-                "rw": bool(mval.get("RW", True)),
-                "propagation": mval.get("Propagation", ""),
-            })
+                port_bindings = (host_config.get("PortBindings") or {})
+                ports = []
+                for c_p, b_list in port_bindings.items():
+                    if b_list:
+                        for b in b_list:
+                            h_p = b.get("HostPort", "")
+                            h_ip = b.get("HostIp", "0.0.0.0") or "0.0.0.0"
+                            ports.append(f"{h_ip}:{h_p} -> {c_p}")
 
-        env_list = (config_v2.get("Config") or {}).get("Env") or []
-        secrets = docker_scan_secrets(env_list)
-        risk_level, risk_reasons = docker_evaluate_risk(config_v2, host_config, mounts)
+                mounts_raw = config_v2.get("MountPoints") or {}
+                mounts = []
+                if isinstance(mounts_raw, dict):
+                    for _, m in mounts_raw.items():
+                        mounts.append({
+                            "source": m.get("Source", ""),
+                            "destination": m.get("Destination", ""),
+                            "mode": m.get("Mode", ""),
+                            "rw": bool(m.get("RW", True)),
+                            "propagation": m.get("Propagation", ""),
+                        })
+                elif isinstance(mounts_raw, list):
+                    for m in mounts_raw:
+                        mounts.append({
+                            "source": m.get("Source", ""),
+                            "destination": m.get("Destination", ""),
+                            "mode": m.get("Mode", ""),
+                            "rw": bool(m.get("RW", True)),
+                            "propagation": m.get("Propagation", ""),
+                        })
 
-        res.append({
-            "id": item,
-            "short_id": item[:12],
-            "name": c_name,
-            "image": img,
-            "created": created,
-            "state": state_str,
-            "running": running,
-            "pid": pid,
-            "exit_code": exit_code,
-            "upper_dir": upper_dir,
-            "merged_dir": merged_dir,
-            "work_dir": work_dir,
-            "log_path": log_path,
-            "ip_address": ip_addr,
-            "ports": ports,
-            "privileged": bool(host_config.get("Privileged")),
-            "risk_level": risk_level,
-            "risk_reasons": risk_reasons,
-            "mounts": mounts,
-            "secrets_found": secrets,
-            "driver": config_v2.get("Driver") or "overlay2",
-        })
+                env_list = (config_v2.get("Config") or {}).get("Env") or []
+                secrets = docker_scan_secrets(env_list)
+                risk_level, risk_reasons = docker_evaluate_risk(config_v2, host_config, mounts)
 
-    res.sort(key=lambda x: x["name"].lower())
+                privileged = bool(host_config.get("Privileged"))
+                driver = config_v2.get("Driver", "overlay2")
+
+                res.append({
+                    "id": item,
+                    "short_id": item[:12],
+                    "name": c_name,
+                    "image": img,
+                    "created": created,
+                    "durum": state_str,
+                    "calisiyor": running,
+                    "pid": pid,
+                    "exit_code": exit_code,
+                    "upper_dir": upper_dir,
+                    "merged_dir": merged_dir,
+                    "work_dir": work_dir,
+                    "log_path": log_path,
+                    "ip_adresi": ip_addr,
+                    "portlar": ports,
+                    "privileged": privileged,
+                    "risk_seviyesi": risk_level,
+                    "risk_nedenleri": risk_reasons,
+                    "mountlar": mounts,
+                    "bulunan_gizli_bilgiler": secrets,
+                    "depolama_surucusu": driver,
+                })
+        except Exception:
+            pass
+
     if not res:
         try:
             out = subprocess.run(["docker", "ps", "-aq"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
@@ -591,27 +631,40 @@ def docker_list_containers():
         except Exception:
             pass
 
+    res.sort(key=lambda x: x["name"].lower())
     return res
 
 
 def docker_get_logs(container_id, tail=200):
     log_file = os.path.join("/var/lib/docker/containers", container_id, f"{container_id}-json.log")
-    if not os.path.exists(log_file):
-        return []
     logs = []
-    try:
-        with open(log_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        logs.append(json.loads(line))
-                    except Exception:
-                        pass
-        if tail > 0 and len(logs) > tail:
-            logs = logs[-tail:]
-    except Exception:
-        pass
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            logs.append(json.loads(line))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    if not logs:
+        try:
+            tail_arg = str(tail) if tail > 0 else "200"
+            out = subprocess.run(["docker", "logs", "--tail", tail_arg, container_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+            if out.returncode == 0:
+                combined = out.stdout + out.stderr
+                for l in combined.splitlines():
+                    if l.strip():
+                        logs.append({"log": l + "\n", "stream": "cli", "time": datetime.now().isoformat()})
+        except Exception:
+            pass
+
+    if tail > 0 and len(logs) > tail:
+        logs = logs[-tail:]
     return logs
 
 
