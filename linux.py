@@ -1323,11 +1323,6 @@ class LinuxAgentController:
     def _docker_stream_acquisition(self, conn, container_id, acquire_diff, acquire_logs, acquire_config, job_id):
         self._set_job_state(job_id, "running")
         c_dir = os.path.join("/var/lib/docker/containers", container_id)
-        if not os.path.exists(c_dir):
-            json_send(conn, {"durum": "hata", "tur": "hata", "is_id": job_id, "mesaj": f"Container directory not found: {c_dir}"})
-            self._clear_job_state(job_id)
-            return
-
         cfg_file = os.path.join(c_dir, "config.v2.json")
         host_file = os.path.join(c_dir, "hostconfig.json")
         log_file = os.path.join(c_dir, f"{container_id}-json.log")
@@ -1340,6 +1335,21 @@ class LinuxAgentController:
             except Exception:
                 pass
 
+        if not config_v2:
+            try:
+                insp = subprocess.run(["docker", "inspect", container_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+                if insp.returncode == 0:
+                    arr = json.loads(insp.stdout)
+                    if arr:
+                        config_v2 = arr[0]
+            except Exception:
+                pass
+
+        if not config_v2:
+            json_send(conn, {"durum": "hata", "tur": "hata", "is_id": job_id, "mesaj": f"Container directory / inspect not found for: {container_id}"})
+            self._clear_job_state(job_id)
+            return
+
         upper_dir = ((config_v2.get("GraphDriver") or {}).get("Data") or {}).get("UpperDir")
         c_name = config_v2.get("Name", "").lstrip("/") or "container"
 
@@ -1348,18 +1358,42 @@ class LinuxAgentController:
         temp_tar.close()
 
         try:
+            import io
             self.log(f"Building Docker evidence bundle for {container_id} ({c_name})...")
             with tarfile.open(temp_tar_path, "w:gz") as tar:
                 if acquire_config:
                     if os.path.exists(cfg_file):
                         tar.add(cfg_file, arcname="config.v2.json")
+                    else:
+                        cfg_bytes = json.dumps(config_v2, indent=2).encode("utf-8")
+                        ti = tarfile.TarInfo(name="config.v2.json")
+                        ti.size = len(cfg_bytes)
+                        ti.mtime = int(time.time())
+                        tar.addfile(ti, io.BytesIO(cfg_bytes))
+
                     if os.path.exists(host_file):
                         tar.add(host_file, arcname="hostconfig.json")
+                    elif config_v2.get("HostConfig"):
+                        hc_bytes = json.dumps(config_v2.get("HostConfig"), indent=2).encode("utf-8")
+                        ti = tarfile.TarInfo(name="hostconfig.json")
+                        ti.size = len(hc_bytes)
+                        ti.mtime = int(time.time())
+                        tar.addfile(ti, io.BytesIO(hc_bytes))
 
-                if acquire_logs and os.path.exists(log_file):
-                    tar.add(log_file, arcname="container.log")
+                if acquire_logs:
+                    if os.path.exists(log_file):
+                        tar.add(log_file, arcname="container.log")
+                    else:
+                        try:
+                            l_out = subprocess.run(["docker", "logs", container_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                            log_bytes = l_out.stdout + l_out.stderr
+                            ti = tarfile.TarInfo(name="container.log")
+                            ti.size = len(log_bytes)
+                            ti.mtime = int(time.time())
+                            tar.addfile(ti, io.BytesIO(log_bytes))
+                        except Exception:
+                            pass
 
-                import io
                 meta_bytes = json.dumps({
                     "edinim_zamani": datetime.now().isoformat(),
                     "konteyner_id": container_id,
