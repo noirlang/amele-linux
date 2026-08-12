@@ -16,6 +16,8 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -274,6 +276,267 @@ def try_install_avml_via_wget(script_dir, t):
         return os.path.isfile(hedef) and os.access(hedef, os.X_OK)
     except Exception:
         return False
+
+
+def docker_get_status():
+    root = "/var/lib/docker"
+    containers_dir = os.path.join(root, "containers")
+    overlay2_dir = os.path.join(root, "overlay2")
+    sock = "/var/run/docker.sock"
+
+    is_avail = os.path.exists(containers_dir) or os.path.exists(overlay2_dir)
+    is_running = os.path.exists(sock)
+
+    count = 0
+    running = 0
+    paused = 0
+    stopped = 0
+
+    if os.path.exists(containers_dir):
+        try:
+            for item in os.listdir(containers_dir):
+                full = os.path.join(containers_dir, item)
+                if os.path.isdir(full):
+                    count += 1
+                    cfg_file = os.path.join(full, "config.v2.json")
+                    if os.path.exists(cfg_file):
+                        try:
+                            with open(cfg_file, "r", encoding="utf-8") as f:
+                                val = json.load(f)
+                                st = val.get("State", {})
+                                if st.get("Running"):
+                                    running += 1
+                                elif st.get("Paused"):
+                                    paused += 1
+                                else:
+                                    stopped += 1
+                        except Exception:
+                            stopped += 1
+        except Exception:
+            pass
+
+    return {
+        "docker_mevcut": is_avail,
+        "docker_calisiyor": is_running,
+        "depolama_surucusu": "overlay2" if os.path.exists(overlay2_dir) else "unknown",
+        "kok_dizin": root,
+        "konteyner_sayisi": count,
+        "calisan_sayisi": running,
+        "duraklatilan_sayisi": paused,
+        "durdurulan_sayisi": stopped,
+    }
+
+
+def docker_evaluate_risk(config_v2, host_config, mounts):
+    score = 0
+    reasons = []
+
+    if host_config.get("Privileged"):
+        score += 50
+        reasons.append("Konteyner tam yetkili (--privileged) modda çalışıyor.")
+
+    for m in mounts:
+        src = m.get("source", "")
+        dst = m.get("destination", "")
+        if "docker.sock" in src or "docker.sock" in dst:
+            score += 50
+            reasons.append("Host Docker soketi (/var/run/docker.sock) konteyner içine mount edilmiş (DoD Escape riski).")
+            break
+
+    for m in mounts:
+        src = m.get("source", "")
+        if src in ["/", "/etc", "/root", "/home", "/proc", "/sys"]:
+            score += 30
+            reasons.append(f"Kritik host dizini doğrudan bağlı: {src} -> {m.get('destination')}")
+
+    if host_config.get("NetworkMode") == "host":
+        score += 20
+        reasons.append("Host ağ ad alanı (NetworkMode: host) doğrudan kullanılıyor.")
+    if host_config.get("PidMode") == "host":
+        score += 25
+        reasons.append("Host süreç ad alanı (PidMode: host) paylaşılıyor.")
+    if host_config.get("IpcMode") == "host":
+        score += 15
+        reasons.append("Host IPC ad alanı (IpcMode: host) paylaşılıyor.")
+
+    for cap in host_config.get("CapAdd") or []:
+        if cap in ["SYS_ADMIN", "ALL", "NET_ADMIN", "SYS_PTRACE"]:
+            score += 20
+            reasons.append(f"Tehlikeli Linux yetkisi eklenmiş: {cap}")
+
+    if host_config.get("AppArmorProfile") == "unconfined":
+        score += 15
+        reasons.append("AppArmor koruması devre dışı bırakılmış (unconfined).")
+    for opt in host_config.get("SecurityOpt") or []:
+        if "seccomp=unconfined" in opt:
+            score += 15
+            reasons.append("Seccomp filtreleri devre dışı (unconfined).")
+
+    if score >= 50:
+        level = "CRITICAL"
+    elif score >= 30:
+        level = "HIGH"
+    elif score >= 15:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+
+    return level, reasons
+
+
+def docker_scan_secrets(env_list):
+    secrets = []
+    keywords = [
+        ("PASSWORD", "Password / Credential"),
+        ("PASSWD", "Password / Credential"),
+        ("SECRET", "Secret Key / Salt"),
+        ("TOKEN", "Access / Bearer Token"),
+        ("API_KEY", "API Key"),
+        ("APIKEY", "API Key"),
+        ("PRIVATE_KEY", "Private Key"),
+        ("ACCESS_KEY", "Cloud Access Key"),
+        ("AUTH", "Auth Credentials"),
+        ("JWT", "JSON Web Token"),
+        ("DB_PASS", "Database Password"),
+    ]
+    for item in env_list:
+        if "=" in item:
+            k, v = item.split("=", 1)
+            uk = k.upper()
+            for kw, kind in keywords:
+                if kw in uk and v.strip():
+                    preview = "******" if len(v) <= 6 else (v[:2] + "..." + v[-2:])
+                    secrets.append({"key": k, "value_preview": preview, "secret_type": kind})
+                    break
+    return secrets
+
+
+def docker_list_containers():
+    root = "/var/lib/docker/containers"
+    if not os.path.exists(root):
+        return []
+
+    res = []
+    for item in os.listdir(root):
+        c_dir = os.path.join(root, item)
+        if not os.path.isdir(c_dir) or len(item) < 12:
+            continue
+
+        cfg_file = os.path.join(c_dir, "config.v2.json")
+        host_file = os.path.join(c_dir, "hostconfig.json")
+
+        config_v2 = {}
+        host_config = {}
+
+        if os.path.exists(cfg_file):
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    config_v2 = json.load(f)
+            except Exception:
+                pass
+
+        if os.path.exists(host_file):
+            try:
+                with open(host_file, "r", encoding="utf-8") as f:
+                    host_config = json.load(f)
+            except Exception:
+                pass
+
+        c_name = config_v2.get("Name", "").lstrip("/") or "unnamed"
+        img = (config_v2.get("Config") or {}).get("Image") or config_v2.get("Image") or "unknown"
+        created = config_v2.get("Created", "")
+        st = config_v2.get("State", {})
+        running = bool(st.get("Running"))
+        pid = int(st.get("Pid") or 0)
+        exit_code = int(st.get("ExitCode") or 0)
+
+        if running:
+            state_str = "running"
+        elif st.get("Paused"):
+            state_str = "paused"
+        elif st.get("Restarting"):
+            state_str = "restarting"
+        else:
+            state_str = "exited"
+
+        gd = (config_v2.get("GraphDriver") or {}).get("Data") or {}
+        upper_dir = gd.get("UpperDir")
+        merged_dir = gd.get("MergedDir")
+        work_dir = gd.get("WorkDir")
+
+        log_candidate = os.path.join(c_dir, f"{item}-json.log")
+        log_path = log_candidate if os.path.exists(log_candidate) else None
+
+        ip_addr = (config_v2.get("NetworkSettings") or {}).get("IPAddress") or None
+
+        ports = []
+        for cport, binds in (host_config.get("PortBindings") or {}).items():
+            for b in binds or []:
+                hp = b.get("HostPort", "")
+                hip = b.get("HostIp", "") or "0.0.0.0"
+                ports.append(f"{hip}:{hp} -> {cport}")
+
+        mounts = []
+        for _, mval in (config_v2.get("MountPoints") or {}).items():
+            mounts.append({
+                "source": mval.get("Source", ""),
+                "destination": mval.get("Destination", ""),
+                "mode": mval.get("Mode", ""),
+                "rw": bool(mval.get("RW", True)),
+                "propagation": mval.get("Propagation", ""),
+            })
+
+        env_list = (config_v2.get("Config") or {}).get("Env") or []
+        secrets = docker_scan_secrets(env_list)
+        risk_level, risk_reasons = docker_evaluate_risk(config_v2, host_config, mounts)
+
+        res.append({
+            "id": item,
+            "short_id": item[:12],
+            "name": c_name,
+            "image": img,
+            "created": created,
+            "state": state_str,
+            "running": running,
+            "pid": pid,
+            "exit_code": exit_code,
+            "upper_dir": upper_dir,
+            "merged_dir": merged_dir,
+            "work_dir": work_dir,
+            "log_path": log_path,
+            "ip_address": ip_addr,
+            "ports": ports,
+            "privileged": bool(host_config.get("Privileged")),
+            "risk_level": risk_level,
+            "risk_reasons": risk_reasons,
+            "mounts": mounts,
+            "secrets_found": secrets,
+            "driver": config_v2.get("Driver") or "overlay2",
+        })
+
+    res.sort(key=lambda x: x["name"].lower())
+    return res
+
+
+def docker_get_logs(container_id, tail=200):
+    log_file = os.path.join("/var/lib/docker/containers", container_id, f"{container_id}-json.log")
+    if not os.path.exists(log_file):
+        return []
+    logs = []
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        logs.append(json.loads(line))
+                    except Exception:
+                        pass
+        if tail > 0 and len(logs) > tail:
+            logs = logs[-tail:]
+    except Exception:
+        pass
+    return logs
 
 
 class LinuxAgentController:
@@ -901,6 +1164,74 @@ class LinuxAgentController:
         finally:
             self._clear_job_state(job_id)
 
+    def _docker_stream_acquisition(self, conn, container_id, acquire_diff, acquire_logs, acquire_config, job_id):
+        self._set_job_state(job_id, "running")
+        c_dir = os.path.join("/var/lib/docker/containers", container_id)
+        if not os.path.exists(c_dir):
+            json_send(conn, {"durum": "hata", "tur": "hata", "is_id": job_id, "mesaj": f"Container directory not found: {c_dir}"})
+            self._clear_job_state(job_id)
+            return
+
+        cfg_file = os.path.join(c_dir, "config.v2.json")
+        host_file = os.path.join(c_dir, "hostconfig.json")
+        log_file = os.path.join(c_dir, f"{container_id}-json.log")
+
+        config_v2 = {}
+        if os.path.exists(cfg_file):
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    config_v2 = json.load(f)
+            except Exception:
+                pass
+
+        upper_dir = ((config_v2.get("GraphDriver") or {}).get("Data") or {}).get("UpperDir")
+        c_name = config_v2.get("Name", "").lstrip("/") or "container"
+
+        temp_tar = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
+        temp_tar_path = temp_tar.name
+        temp_tar.close()
+
+        try:
+            self.log(f"Building Docker evidence bundle for {container_id} ({c_name})...")
+            with tarfile.open(temp_tar_path, "w:gz") as tar:
+                if acquire_config:
+                    if os.path.exists(cfg_file):
+                        tar.add(cfg_file, arcname="config.v2.json")
+                    if os.path.exists(host_file):
+                        tar.add(host_file, arcname="hostconfig.json")
+
+                if acquire_logs and os.path.exists(log_file):
+                    tar.add(log_file, arcname="container.log")
+
+                import io
+                meta_bytes = json.dumps({
+                    "edinim_zamani": datetime.now().isoformat(),
+                    "konteyner_id": container_id,
+                    "isim": c_name,
+                    "config_v2": config_v2,
+                }, indent=2).encode("utf-8")
+
+                ti = tarfile.TarInfo(name="docker_metadata.json")
+                ti.size = len(meta_bytes)
+                ti.mtime = int(time.time())
+                tar.addfile(ti, io.BytesIO(meta_bytes))
+
+                if acquire_diff and upper_dir and os.path.exists(upper_dir) and os.path.isdir(upper_dir):
+                    tar.add(upper_dir, arcname="upper_drift_files")
+
+            self._stream_file(conn, temp_tar_path, job_id, delete_after_success=True)
+
+        except Exception as e:
+            self.log(f"Docker acquisition error: {e}")
+            json_send(conn, {"durum": "hata", "tur": "hata", "is_id": job_id, "mesaj": str(e)})
+            try:
+                if os.path.exists(temp_tar_path):
+                    os.remove(temp_tar_path)
+            except Exception:
+                pass
+        finally:
+            self._clear_job_state(job_id)
+
     def _handle_client(self, conn, addr):
         self.log(f"{self.t['conn']} {addr}")
         authorized = False
@@ -1020,6 +1351,38 @@ class LinuxAgentController:
                         "eylem": action,
                         "mesaj": msg,
                     })
+
+                elif cmd == "docker_durum":
+                    try:
+                        st = docker_get_status()
+                        json_send(conn, {"durum": "ok", **st})
+                    except Exception as e:
+                        json_send(conn, {"durum": "hata", "mesaj": str(e)})
+
+                elif cmd == "docker_listele":
+                    try:
+                        containers = docker_list_containers()
+                        json_send(conn, {"durum": "ok", "konteynerler": containers, "toplam": len(containers)})
+                    except Exception as e:
+                        json_send(conn, {"durum": "hata", "mesaj": str(e)})
+
+                elif cmd == "docker_loglar":
+                    try:
+                        cid = message.get("konteyner_id", "")
+                        tail = int(message.get("tail", 200))
+                        logs = docker_get_logs(cid, tail)
+                        json_send(conn, {"durum": "ok", "konteyner_id": cid, "loglar": logs, "toplam": len(logs)})
+                    except Exception as e:
+                        json_send(conn, {"durum": "hata", "mesaj": str(e)})
+
+                elif cmd == "docker_edinim_baslat":
+                    cid = message.get("konteyner_id", "")
+                    job_id = message.get("is_id") or ("DOCKER_" + str(int(time.time())))
+                    acquire_diff = bool(message.get("acquire_diff", True))
+                    acquire_logs = bool(message.get("acquire_logs", True))
+                    acquire_config = bool(message.get("acquire_config", True))
+                    self.log(f"Starting Docker acquisition for {cid}")
+                    self._docker_stream_acquisition(conn, cid, acquire_diff, acquire_logs, acquire_config, job_id)
 
                 else:
                     json_send(conn, {"durum": "hata", "mesaj": f"{self.t['unknown_cmd']}: {cmd}"})
