@@ -515,6 +515,82 @@ def docker_list_containers():
         })
 
     res.sort(key=lambda x: x["name"].lower())
+    if not res:
+        try:
+            out = subprocess.run(["docker", "ps", "-aq"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+            if out.returncode == 0:
+                cids = out.stdout.strip().split()
+                if cids:
+                    insp_out = subprocess.run(["docker", "inspect"] + cids, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+                    if insp_out.returncode == 0:
+                        data = json.loads(insp_out.stdout)
+                        for d in data:
+                            c_id = d.get("Id", "")
+                            c_name = d.get("Name", "").lstrip("/") or "unnamed"
+                            img = (d.get("Config") or {}).get("Image") or "unknown"
+                            created = d.get("Created", "")
+                            st = d.get("State", {})
+                            running = bool(st.get("Running"))
+                            pid = int(st.get("Pid") or 0)
+                            exit_code = int(st.get("ExitCode") or 0)
+                            state_str = "running" if running else ("paused" if st.get("Paused") else "exited")
+                            host_config = d.get("HostConfig") or {}
+                            gdata = (d.get("GraphDriver") or {}).get("Data") or {}
+                            upper_dir = gdata.get("UpperDir")
+                            merged_dir = gdata.get("MergedDir")
+                            work_dir = gdata.get("WorkDir")
+                            log_path = d.get("LogPath")
+                            net = d.get("NetworkSettings") or {}
+                            ip_addr = net.get("IPAddress") or None
+                            port_bindings = host_config.get("PortBindings") or {}
+                            ports = []
+                            for c_p, b_list in port_bindings.items():
+                                if b_list:
+                                    for b in b_list:
+                                        h_p = b.get("HostPort", "")
+                                        h_ip = b.get("HostIp", "0.0.0.0") or "0.0.0.0"
+                                        ports.append(f"{h_ip}:{h_p} -> {c_p}")
+                            mounts_raw = d.get("Mounts") or []
+                            mounts = []
+                            for m in mounts_raw:
+                                mounts.append({
+                                    "source": m.get("Source", ""),
+                                    "destination": m.get("Destination", ""),
+                                    "mode": m.get("Mode", ""),
+                                    "rw": bool(m.get("RW", True)),
+                                    "propagation": m.get("Propagation", ""),
+                                })
+                            env_list = (d.get("Config") or {}).get("Env") or []
+                            secrets = docker_scan_secrets(env_list)
+                            risk_level, risk_reasons = docker_evaluate_risk(d, host_config, mounts)
+                            privileged = bool(host_config.get("Privileged"))
+                            driver = d.get("Driver", "overlay2")
+                            res.append({
+                                "id": c_id,
+                                "short_id": c_id[:12],
+                                "name": c_name,
+                                "image": img,
+                                "created": created,
+                                "durum": state_str,
+                                "calisiyor": running,
+                                "pid": pid,
+                                "exit_code": exit_code,
+                                "upper_dir": upper_dir,
+                                "merged_dir": merged_dir,
+                                "work_dir": work_dir,
+                                "log_path": log_path,
+                                "ip_adresi": ip_addr,
+                                "portlar": ports,
+                                "privileged": privileged,
+                                "risk_seviyesi": risk_level,
+                                "risk_nedenleri": risk_reasons,
+                                "mountlar": mounts,
+                                "bulunan_gizli_bilgiler": secrets,
+                                "depolama_surucusu": driver,
+                            })
+        except Exception:
+            pass
+
     return res
 
 
@@ -1460,11 +1536,24 @@ def startup_wizard():
             print(AVML_RELEASE_URL)
             print(script_dir)
 
-    return lang, security_key, port, avml_path
-
-
 def main():
-    lang, security_key, port, avml_path = startup_wizard()
+    import argparse
+    parser = argparse.ArgumentParser(description="Amele Linux Agent")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to listen on")
+    parser.add_argument("--key", type=str, default="", help="Security key / password")
+    parser.add_argument("--lang", type=str, default="tr", choices=["tr", "en"], help="Language (tr/en)")
+    parser.add_argument("--non-interactive", action="store_true", help="Start agent without prompt wizard")
+    args, _ = parser.parse_known_args()
+
+    if args.non_interactive or "--port" in sys.argv:
+        lang = args.lang
+        security_key = args.key
+        port = args.port
+        script_dir = app_base_dir()
+        avml_path = find_avml(script_dir)
+    else:
+        lang, security_key, port, avml_path = startup_wizard()
+
     controller = LinuxAgentController(language=lang, security_key=security_key, port=port, avml_path=avml_path)
     t = controller.t
 
@@ -1481,3 +1570,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
