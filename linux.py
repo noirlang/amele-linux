@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amele Linux Agent v0.0.2
+Amele Linux Agent v0.0.6
 - TUI startup wizard
 - Remote disk imaging protocol compatible with controller
 - AVML check/install guidance + RAM acquisition over protocol
@@ -22,7 +22,7 @@ import threading
 import time
 from datetime import datetime
 
-VERSION = "0.0.2"
+VERSION = "0.0.6"
 HOST = "0.0.0.0"
 DEFAULT_PORT = 4444
 BUFFER_SIZE = 1024 * 1024
