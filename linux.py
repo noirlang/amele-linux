@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amele Linux Agent v0.0.1
+Amele Linux Agent v0.0.2
 - TUI startup wizard
 - Remote disk imaging protocol compatible with controller
 - AVML check/install guidance + RAM acquisition over protocol
@@ -22,6 +22,7 @@ import threading
 import time
 from datetime import datetime
 
+VERSION = "0.0.2"
 HOST = "0.0.0.0"
 DEFAULT_PORT = 4444
 BUFFER_SIZE = 1024 * 1024
@@ -32,7 +33,7 @@ SUPPORTED_OUTPUT_FORMATS = {"raw", "aff4"}
 
 
 TR = {
-    "banner": "Amele Linux Agent (TUI)",
+    "banner": f"Amele Linux Agent v{VERSION} (TUI)",
     "ask_lang": "Dil secin [tr/en] (varsayilan: tr): ",
     "ask_sec": "Guvenlik parolasi kullanilsin mi? [E/h]: ",
     "ask_pw": "Guvenlik parolasi: ",
@@ -64,7 +65,7 @@ TR = {
 }
 
 EN = {
-    "banner": "Amele Linux Agent (TUI)",
+    "banner": f"Amele Linux Agent v{VERSION} (TUI)",
     "ask_lang": "Select language [tr/en] (default: tr): ",
     "ask_sec": "Enable security password? [Y/n]: ",
     "ask_pw": "Security password: ",
