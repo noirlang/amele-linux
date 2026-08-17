@@ -6,22 +6,37 @@
 ![Amele Linux Agent Demo](linux.gif)
 </div>
 
-## Turkce
+## 🇹🇷 Türkçe
 
-Bu depo, Amele ana uygulamasi icin Linux Agent bileşenini icerir.
+Bu depo, **Amele Adli Bilişim Platformu** için geliştirilmiş Linux Agent bileşenidir. Hedef Linux sistemler üzerinde bağımsız çalışarak disk, RAM ve Docker konteyner delillerinin güvenli TCP soketi üzerinden ana Amele uygulamasına aktarılmasını sağlar.
 
-- Ana repo: https://github.com/noirlang/amele
-- Linux Agent repo: https://github.com/noirlang/amele-linux
-- Web sitesi: https://amele.noirlang.tr
+- **Ana Repo:** https://github.com/noirlang/amele
+- **Linux Agent Repo:** https://github.com/noirlang/amele-linux
+- **Web Sitesi:** https://amele.noirlang.tr
 
-### Hazir Binary Indirme
+---
+
+### Yetenekler
+
+- **TUI Başlatma Sihirbazı:** Dil (TR/EN), port ve güvenlik anahtarı/parolası yapılandırması.
+- **Disk Edinimi:** `/dev/sd*`, `/dev/nvme*`, `/dev/vd*` blok aygıtlarından canlı RAW veya AFF4 formatında bit-by-bit imaj aktarımı.
+- **Canlı Hashleme:** İmaj ve RAM transferi sırasında eşzamanlı SHA-256 ve MD5 hash üretimi.
+- **RAM Edinimi:** AVML aracılığıyla canlı bellek dökümü (otomatik indirme/kurulum desteği).
+- **Docker Konteyner DFIR:** Çalışan/duran konteynerleri listeleme, log çekme, konfigürasyon (`config.v2.json`, `hostconfig.json`) ve Overlay2 UpperDir drift katmanını `.tar.gz` olarak paketleme.
+
+---
+
+### Hazır Binary İndirme
 
 ```bash
 wget -O amele-linux https://amele.noirlang.tr/amele-linux
 chmod +x amele-linux
+sudo ./amele-linux
 ```
 
-### Linux Binary Derleme
+---
+
+### Kaynak Koddan Derleme
 
 ```bash
 python -m venv /tmp/amele-linux-build-venv
@@ -29,63 +44,49 @@ python -m venv /tmp/amele-linux-build-venv
 /tmp/amele-linux-build-venv/bin/pyinstaller --onefile --name amele-linux --distpath dist --workpath build --specpath build linux.py
 ```
 
-Cikti dosyasi:
-
-```text
-dist/amele-linux
-```
-
-### Calistirma
-
-```bash
-./amele-linux
-```
-
-### Ana Uygulama ile Baglanti
-
-1. Amele masaustu uygulamasinda Linux araclari ekranina gecin.
-2. Agent'in dinledigi IP/Port degerlerini uygulamaya girin.
-3. Token kullaniyorsaniz ayni tokeni uygulamaya da girin.
-4. Baglanti ve edinim adimlarini baslatin.
-
-### CI / Otomatik Derleme
-
-Bu repo **GitHub Actions** ile otomatik derleme yapar.
-
-Pipeline yalnizca commit mesajinda `[build]` etiketi varsa tetiklenir:
-
-```bash
-git commit -m "feat: yeni özellik [build]"
-```
-
-Etiketsiz commit'ler push edilir ama derleme baslatilmaz.
-
-**Manuel tetikleme:** GitHub Actions sekmesinde "Run workflow" butonu.
-
-Pipeline adimlari:
-1. `metadata` — commit slug ve SHA hesaplar
-2. `build` — Python 3.12 + PyInstaller ile `amele-linux` binary uretir
-3. `release` — GitHub Releases'a prerelease olarak yukler
+Çıktı: `dist/amele-linux`
 
 ---
 
+### Ana Uygulama ile Bağlantı
 
-## English
+1. Hedef makinede `sudo ./amele-linux` çalıştırın.
+2. Amele masaüstü uygulamasında **Ajan / Uzak Araçlar** ekranına geçin.
+3. Hedef IP, Port (varsayılan: `4444`) ve parola/token değerini girerek bağlanın.
 
-This repository contains the Linux Agent component for the Amele main application.
+---
 
-- Main repo: https://github.com/noirlang/amele
-- Linux Agent repo: https://github.com/noirlang/amele-linux
-- Website: https://amele.noirlang.tr
+## 🇬🇧 English
+
+This repository contains the Linux Agent component for the **Amele Digital Forensics Platform**. It runs independently on target Linux systems to stream disk, memory, and Docker evidence to the main Amele desktop application over secure TCP sockets.
+
+- **Main Repo:** https://github.com/noirlang/amele
+- **Linux Agent Repo:** https://github.com/noirlang/amele-linux
+- **Website:** https://amele.noirlang.tr
+
+---
+
+### Capabilities
+
+- **Interactive TUI Wizard:** Language selection (TR/EN), port configuration, and security key setup.
+- **Disk Acquisition:** Live bit-by-bit image streaming from `/dev/sd*`, `/dev/nvme*`, and `/dev/vd*` devices in RAW or AFF4 formats.
+- **Live Hashing:** Simultaneous on-the-fly SHA-256 and MD5 checksum computation.
+- **RAM Acquisition:** Volatile memory capture via AVML (with automatic download/install assistance).
+- **Docker & Container DFIR:** Container listing, log extraction, raw runtime configs (`config.v2.json`, `hostconfig.json`), and Overlay2 UpperDir runtime drift packaging into `.tar.gz`.
+
+---
 
 ### Download Prebuilt Binary
 
 ```bash
 wget -O amele-linux https://amele.noirlang.tr/amele-linux
 chmod +x amele-linux
+sudo ./amele-linux
 ```
 
-### Build Linux Binary
+---
+
+### Build from Source
 
 ```bash
 python -m venv /tmp/amele-linux-build-venv
@@ -93,21 +94,13 @@ python -m venv /tmp/amele-linux-build-venv
 /tmp/amele-linux-build-venv/bin/pyinstaller --onefile --name amele-linux --distpath dist --workpath build --specpath build linux.py
 ```
 
-Output:
+Output: `dist/amele-linux`
 
-```text
-dist/amele-linux
-```
-
-### Run
-
-```bash
-./amele-linux
-```
+---
 
 ### Connect with Main App
 
-1. Open the Linux tools section in the Amele desktop app.
-2. Enter the agent IP/Port values.
-3. If token security is enabled, use the same token in the app.
-4. Start connection and acquisition workflows.
+1. Run `sudo ./amele-linux` on the target machine.
+2. Open the **Agent / Remote Tools** tab in Amele desktop application.
+3. Enter the target IP, Port (default: `4444`), and optional security token.
+
