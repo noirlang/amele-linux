@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Amele Linux Agent v0.0.6
+Amele Linux Agent v0.0.7
 - TUI startup wizard
 - Remote disk imaging protocol compatible with controller
 - AVML check/install guidance + RAM acquisition over protocol
@@ -22,13 +22,13 @@ import threading
 import time
 from datetime import datetime
 
-VERSION = "0.0.6"
+VERSION = "0.0.7"
 HOST = "0.0.0.0"
 DEFAULT_PORT = 4444
 BUFFER_SIZE = 1024 * 1024
 AVML_BIN_NAME = "avml"
 AVML_RELEASE_URL = "https://github.com/microsoft/avml/releases"
-AVML_DIRECT_URL = "https://github.com/microsoft/avml/releases/latest/download/avml"
+AVML_DIRECT_URL = "https://download.amele.noirlang.tr/avml"
 SUPPORTED_OUTPUT_FORMATS = {"raw", "aff4"}
 
 
@@ -265,18 +265,24 @@ def try_install_avml(lang, t):
 
 
 def try_install_avml_via_wget(script_dir, t):
-    if not shutil.which("wget"):
-        return False
-
     hedef = os.path.join(script_dir, AVML_BIN_NAME)
-    print(f"{t['wget_try']} wget {AVML_DIRECT_URL}")
-
-    try:
-        subprocess.run(["wget", AVML_DIRECT_URL, "-O", hedef], check=True)
-        subprocess.run(["chmod", "+x", hedef], check=True)
-        return os.path.isfile(hedef) and os.access(hedef, os.X_OK)
-    except Exception:
-        return False
+    if shutil.which("wget"):
+        print(f"{t['wget_try']} wget {AVML_DIRECT_URL}")
+        try:
+            subprocess.run(["wget", AVML_DIRECT_URL, "-O", hedef], check=True)
+            subprocess.run(["chmod", "+x", hedef], check=True)
+            return os.path.isfile(hedef) and os.access(hedef, os.X_OK)
+        except Exception:
+            pass
+    if shutil.which("curl"):
+        print(f"{t['wget_try']} curl {AVML_DIRECT_URL}")
+        try:
+            subprocess.run(["curl", "-sSL", AVML_DIRECT_URL, "-o", hedef], check=True)
+            subprocess.run(["chmod", "+x", hedef], check=True)
+            return os.path.isfile(hedef) and os.access(hedef, os.X_OK)
+        except Exception:
+            pass
+    return False
 
 
 def docker_get_status():
