@@ -31,6 +31,17 @@ AVML_RELEASE_URL = "https://github.com/microsoft/avml/releases"
 AVML_DIRECT_URL = "https://download.amele.noirlang.tr/avml"
 SUPPORTED_OUTPUT_FORMATS = {"raw", "aff4"}
 
+ASCII_LOGO = r"""          ⣠⣧⡀
+         ⣰⠃⡏⢳⡀
+        ⡴⠁ ⡇ ⠳⡀
+       ⡼⠁ ⡼⠹⡄ ⠹⡄
+     ⢀⡜⠁⢀⡜⠁ ⠘⣆ ⠙⣆
+    ⢀⡞ ⢀⣀⣙⡦⠦⣞⣁⣀ ⠘⣆
+   ⢠⠎⠑⣤⣏⣉⣉⠑⡖⢉⣉⣉⣳⡔⠉⢆
+  ⢠⠿⣄⡰⠋⠳⣤⣤⣤⢧⣤⣤⡴⠋⠳⣀⡼⢧
+ ⣰⠋ ⡼⠛⢦⡞      ⠘⣦⠞⠻⡄⠈⢳⡀
+⣰⣇⣀⣼⣁⣠⠞        ⠘⢦⣀⣹⣄⣀⣷⡀"""
+
 
 TR = {
     "banner": f"Amele Linux Agent v{VERSION} (TUI)",
@@ -1593,17 +1604,19 @@ class LinuxAgentController:
                 pass
 
 
-def startup_wizard():
+def startup_wizard(show_logo=True):
     if os.name == "nt":
         print(TR["linux_only"])
         raise SystemExit(1)
+
+    if show_logo:
+        print(f"{ASCII_LOGO}\n")
+        print(f"Amele Linux Agent v{VERSION} (TUI)\n")
 
     lang = input(TR["ask_lang"]).strip().lower() or "tr"
     if lang not in {"tr", "en"}:
         lang = "tr"
     t = EN if lang == "en" else TR
-
-    print(t["banner"])
 
     sec_answer = input(t["ask_sec"]).strip()
     security_key = ""
@@ -1657,23 +1670,34 @@ def startup_wizard():
             print(AVML_RELEASE_URL)
             print(script_dir)
 
+    return lang, security_key, port, avml_path
+
+
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Amele Linux Agent")
+    parser = argparse.ArgumentParser(
+        description=f"{ASCII_LOGO}\n\nAmele Linux Agent v{VERSION}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to listen on")
     parser.add_argument("--key", type=str, default="", help="Security key / password")
     parser.add_argument("--lang", type=str, default="tr", choices=["tr", "en"], help="Language (tr/en)")
     parser.add_argument("--non-interactive", action="store_true", help="Start agent without prompt wizard")
+    parser.add_argument("--no-logo", "-q", "--quiet", action="store_true", help="Suppress ASCII logo")
     args, _ = parser.parse_known_args()
 
+    show_logo = not args.no_logo
     if args.non_interactive or "--port" in sys.argv:
+        if show_logo:
+            print(f"{ASCII_LOGO}\n")
+            print(f"Amele Linux Agent v{VERSION}\n")
         lang = args.lang
         security_key = args.key
         port = args.port
         script_dir = app_base_dir()
         avml_path = find_avml(script_dir)
     else:
-        lang, security_key, port, avml_path = startup_wizard()
+        lang, security_key, port, avml_path = startup_wizard(show_logo=show_logo)
 
     controller = LinuxAgentController(language=lang, security_key=security_key, port=port, avml_path=avml_path)
     t = controller.t
